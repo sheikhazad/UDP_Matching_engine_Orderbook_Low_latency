@@ -1,0 +1,380 @@
+
+1. OVERVIEW
+-----------
+This project implements a multi-threaded matching engine similar to those used by real exchanges.
+It receives orders via UDP, processes them in a dedicated matching thread, maintains separate
+order books for each symbol, matches buyers and sellers using price-time priority, supports
+market and limit orders, handles partial fills, and publishes results to stdout.
+
+It is not just an order book; it is a full matching engine:
+
+- Network input
+- Multi-symbol order books
+- Matching logic
+- Trade generation
+- Cancel handling
+- Market order IOC behavior
+- Top-of-book updates
+- Thread-safe output
+
+This guide explains the business logic, gives examples for each rule, and maps each requirement
+directly to the C++ classes implemented.
+
+
+2. ORDER TYPES AND BUSINESS MEANING
+-----------------------------------
+2.1 Limit Orders (price > 0)
+A limit order specifies a maximum buy price or minimum sell price.
+
+Behavior:
+- May trade immediately if crossing, otherwise rests on the book.
+- If not fully filled, the remainder rests on the order book.
+- Remains until matched or canceled.
+
+2.2 Market Orders (price = 0)
+A market order executes immediately at the best available prices (can match across multiple
+price levels). Any remaining quantity that cannot be filled is canceled (IOC behavior).
+
+2.3 Cancel Requests
+A cancel removes a resting order from the book.
+
+Example:
+C, 42, 1001 means:
+User 42 requests cancellation of the order with userOrderId 1001.
+If the order is already filled or gone, the cancel still produces an acknowledgement.
+
+
+3. ORDER BOOK STRUCTURE
+-----------------------
+Each symbol has its own independent order book, represented by SymbolOrderbook.
+
+3.1 Buy Side (Bids)
+- Stored as a vector of price levels sorted by highest price first.
+- Within each price level, orders are kept in FIFO order.
+
+Example:
+Buy side:
+Price 101: [order A, order B]
+Price 100: [order C]
+
+3.2 Sell Side (Asks)
+- Stored as a vector of price levels sorted by lowest price first.
+- Within each price level, orders are kept in FIFO order.
+
+Example:
+Sell side:
+Price 99: [order X]
+Price 100: [order Y, order Z]
+
+3.3 Price Levels
+Each price level contains:
+- A price
+- A total quantity
+- A FIFO queue of order iterators referencing stable order storage
+
+Example:
+At price 100:
+Orders: [C, D, E] in arrival order.
+
+3.4 Price-Time Priority
+Better price wins. If prices are equal, earlier arrival wins.
+
+Example:
+Two buy orders at price 50:
+Order A arrives at 10:00:00
+Order B arrives at 10:00:01
+Order A must be matched before order B.
+
+
+4. MATCHING LOGIC WITH EXAMPLES
+-------------------------------
+4.1 When a trade occurs
+- A buy trades when buy price >= best sell price.
+- A sell trades when sell price <= best buy price.
+- A market order always attempts to trade.
+
+Example:
+Best sell = 100
+Incoming buy = 101
+→ Trade occurs.
+
+4.2 Trade Price
+Trade price is the price of the resting order on the book.
+
+Example:
+Resting sell at 100
+Incoming buy at 105
+Trade price = 100
+
+4.3 Trade Quantity
+Trade quantity = min(incoming quantity, resting quantity)
+
+Example:
+Incoming buy 300
+Resting sell 120
+Trade = 120
+
+4.4 Partial Fills
+If the incoming order still has remaining quantity after a trade, it continues matching
+against the next eligible resting orders.
+
+Example:
+Incoming buy 300
+Resting sells:
+100 @ 99
+150 @ 100
+200 @ 101
+
+Matches:
+100 with first
+150 with second
+50 with third
+Remaining 150 of the third order stays on the book.
+
+4.5 Multiple Trades from One Order
+A single incoming order may generate multiple trades as it walks through price levels.
+
+Example:
+Incoming buy 500
+Matches:
+Trade 1: 200
+Trade 2: 150
+Trade 3: 100
+Trade 4: 50
+
+4.6 Market Order Completion
+Any unfilled quantity of a market order is canceled.
+
+Example:
+Market buy 300
+Only 200 available
+→ Trade 200
+→ Remaining 100 canceled
+
+
+5. MULTI-SYMBOL SUPPORT
+-----------------------
+Each symbol has its own independent SymbolOrderbook instance. Orders for different symbols
+never interact.
+
+Example:
+Order 1: N, 1, BTCUSD, 10000, 1, B, 10
+Order 2: N, 2, ETHUSD, 2000, 5, S, 11
+
+These orders must not interact because they belong to different symbols.
+
+
+6. THREADING MODEL WITH EXAMPLES
+--------------------------------
+The engine uses three threads coordinated via ThreadSafeQueue instances.
+
+6.1 Input Thread
+- Binds UDP port 1234 (with retry logic to handle transient port reuse).
+- Receives UDP packets and pushes parsed commands into the input queue.
+
+Example:
+UDP packet arrives:
+N, 1, BTCUSD, 10000, 1, B, 10
+Input thread parses and pushes the corresponding Command into the input queue.
+
+6.2 Processing Thread
+- Consumes commands from the input queue.
+- Owns the MatchingEngine instance.
+- Updates per-symbol books and generates output lines.
+
+Example:
+Processing thread pops the command and inserts the order into the BTCUSD SymbolOrderbook,
+potentially generating trades and top-of-book updates.
+
+6.3 Output Thread
+- Consumes lines from the output queue.
+- Writes CSV events to stdout.
+- Flushes after each line to satisfy the test harness.
+
+Example:
+After matching, the processing thread generates:
+T, 1,10, 2,11, 10000, 1
+Output thread prints this line safely to stdout.
+
+
+7. INPUT COMMANDS WITH EXAMPLES
+-------------------------------
+7.1 New Order
+Format:
+N, userId, symbol, price, quantity, side, userOrderId
+
+Example:
+N, 42, BTCUSD, 30000, 2, B, 1001
+
+7.2 Cancel Order
+Format:
+C, userId, userOrderId
+
+Example:
+C, 42, 1001
+
+7.3 Flush
+Format:
+F
+
+Behavior:
+Clears all books for all symbols.
+
+Example:
+F
+→ All symbols reset; no resting orders remain.
+
+
+8. OUTPUT EVENTS WITH EXAMPLES
+------------------------------
+8.1 Order Acknowledgement
+Format:
+A, userId, userOrderId
+
+Example:
+A, 42, 1001
+
+8.2 Cancel Acknowledgement
+Format:
+C, userId, userOrderId
+
+Example:
+C, 42, 1001
+
+8.3 Trade
+Format:
+T, userIdBuy, userOrderIdBuy, userIdSell, userOrderIdSell, price, quantity
+
+Example:
+T, 42,1001, 7,2002, 30000, 1
+
+8.4 Top-of-Book Update
+Format:
+B, side, price, totalQuantity
+
+Examples:
+B, B, 30000, 5
+B, S, -, -
+
+
+9. BUSINESS RATIONALE FOR DESIGN CHOICES
+----------------------------------------
+9.1 Price-Time Priority
+Ensures fairness and predictable matching behavior.
+
+9.2 FIFO Queues per Price Level
+Guarantee deterministic matching within each price level.
+
+9.3 Market Orders as IOC
+Market orders must execute immediately at available prices; any remainder is canceled,
+which matches typical IOC semantics.
+
+9.4 Separate Threads
+Separate threads prevent network delays or stdout blocking from affecting matching logic.
+The processing thread remains focused on deterministic state transitions.
+
+9.5 UDP Input
+UDP provides low-latency, connectionless delivery, which is common in trading environments.
+
+9.6 stdout Output
+Plain stdout output is simple to capture and compare against expected results in a test harness.
+
+9.7 (userId, userOrderId)
+The pair (userId, userOrderId) uniquely identifies an order and is used as the logical key
+for cancels and acknowledgements.
+
+
+10. EXAMPLE MATCHING SEQUENCE
+-----------------------------
+Incoming: Buy 300 @ 100
+Resting sells:
+100 @ 99 (A)
+150 @ 99.5 (B)
+200 @ 100 (C)
+
+Matches:
+Trade 100 with A
+Trade 150 with B
+Trade 50 with C
+
+Remaining:
+Order C has 150 left resting at price 100.
+
+
+11. FLUSH BEHAVIOR
+------------------
+Command F clears all books.
+
+Example:
+Before:
+BTCUSD has 20 resting orders.
+After F:
+BTCUSD book is empty; no resting orders remain.
+
+
+12. REQUIREMENT → C++ CLASS MAPPING
+-----------------------------------
+Core classes and their responsibilities:
+
+MatchingEngine
+    - Central dispatcher for parsed commands.
+    - Maintains a map from symbol to SymbolOrderbook.
+    - Routes NewOrder, Cancel, and Flush commands to the appropriate books.
+
+SymbolOrderbook
+    - Maintains bid and ask sides for a single symbol.
+    - Uses sorted vectors of price levels and stable order storage.
+    - Implements matching logic, partial fills, market IOC behavior, and top-of-book updates.
+
+Order
+    - Represents a single order (price, quantity, side, userId, userOrderId).
+    - Stored in a std::deque to provide stable iterators.
+
+OrderKey
+    - Composite key (userId, userOrderId).
+    - Used as the key in an unordered_map for O(1) average-time lookup.
+
+TopOfBook
+    - Stores best bid and best ask snapshot for a symbol.
+    - Used to detect changes and emit B-messages only when necessary.
+
+ThreadSafeQueue<T>
+    - Provides a blocking, thread-safe FIFO queue.
+    - Used between:
+      - Input thread and processing thread (Command queue).
+      - Processing thread and output thread (string output queue).
+
+MatchingEngineMain.cpp
+    - Defines the three-thread model:
+      - Input thread: UDP recvfrom loop with bind retry logic.
+      - Processing thread: owns MatchingEngine and applies commands.
+      - Output thread: prints lines to stdout and flushes.
+
+Flush behavior
+    - Implemented in MatchingEngine by clearing the symbol-to-book map,
+      effectively resetting all SymbolOrderbook instances.
+
+
+13. REAL MARKET ANALOGY
+-----------------------
+This engine models the core of real matching engines used by exchanges.
+
+Included:
+- Order entry
+- Matching
+- Trade generation
+- FIFO fairness
+- Market and limit behavior
+- Multi-symbol support
+- Cancel logic
+- Top-of-book updates
+
+Omitted:
+- Risk checks
+- Persistence and recovery
+- Market data broadcasting infrastructure
+- Advanced order types (e.g., stop, iceberg, pegged)
+
+The implemented core logic aligns with typical exchange-style matching behavior while
+remaining focused, deterministic, and suitable for testing and learning.
+

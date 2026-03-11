@@ -1,0 +1,88 @@
+
+
+                                    ┌──────────────────────────────┐
+                                    │        SymbolOrderbook       │
+                                    └──────────────────────────────┘
+                                                │
+            ┌─────────────────────-------------─┼──────────────────────────────┐
+            │                                   │                              │
+            ▼                                   ▼                              ▼
+
+┌──────────────────────────────┐   ┌──────────────────────────────┐   ┌──────────────────────────────┐
+│  bids_ (vector<PriceLevel>)  │   │ asks_ (vector<PriceLevel>)   │   │ orders_ (deque<Order>)       │
+│  sorted DESC                 │   │ sorted ASC                   │   │ owns all Order objects       │
+└──────────────────────────────┘   └──────────────────────────────┘   │ iterators never invalidate   │
+                                                                       └──────────────────────────────┘
+                                                                                   │
+                                                                                   ▼
+                                                                       ┌──────────────────────────────┐
+                                                                       │ slotPool_ (OrderSlotPool)    │
+                                                                       │ recycles OrderIterator slots │
+                                                                       │ allocate() / release()       │
+                                                                       └──────────────────────────────┘
+            │                                   │
+            ▼                                   ▼
+
+       PriceLevel                         PriceLevel
+┌──────────────────────────┐        ┌──────────────────────────┐
+│ price                    │        │ price                    │
+│ totalQuantity            │        │ totalQuantity            │
+│ orders: deque<OrderIterator>│     │ orders: deque<OrderIterator>│
+└──────────────────────────┘        └──────────────────────────┘
+            │                                   │
+            ▼                                   ▼
+
+        ┌──────────────────────────────────────────────┐
+        │ OrderIterator → refers into orders_ deque     │
+        │ Stable for lifetime of Order object           │
+        └──────────────────────────────────────────────┘
+
+
+//-----------Cancel lookup path------------------------------
+unordered_map<OrderKey → OrderIterator>
+                     │
+                     ▼
+         OrderIterator into orders_
+                     │
+                     ▼
+     Remove iterator from PriceLevel.orders
+     slotPool_.release(iterator)
+
+
+//-----------Matching path (Buy example)----------
+addLimitBuy(price, qty)
+    │
+    ▼
+while qty > 0 and best ask price <= limit:
+    take asks_.front()
+    walk FIFO queue of iterators:
+        Order& o = *it
+        skip self
+        trade
+        reduce quantities
+        if filled → slotPool_.release(it)
+    if price level empty → erase it
+if qty remains → rest order in bids_
+
+
+/////////////////////////////////////////
+/*
+“All orders live in a std::deque<Order>, so iterators never invalidate.
+OrderSlotPool recycles iterators of cancelled/filled orders to avoid memory
+growth and improve cache locality.
+
+Each price level stores a price, total quantity, and a FIFO deque<OrderIterator>.
+This enforces strict price–time priority.
+
+Bids are sorted descending, asks ascending.
+Price‑level lookup is O(log N) via binary search.
+
+Cancels are O(1) via a hash map from (userId, orderId) to OrderIterator.
+
+Matching is a tight loop over the best price level:
+walk FIFO, skip self‑matches, trade, reduce quantities, release filled orders,
+and remove empty price levels.
+
+This architecture is deterministic, cache‑efficient, and minimal — ideal for a
+low‑latency matching engine.”
+*/

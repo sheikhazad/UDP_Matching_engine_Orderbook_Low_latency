@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuites>
+  <testsuite name="MatchingEngineTests" tests="16" failures="0" errors="0" time="0" timestamp="2026-03-11T07:23:07+00:00">
+    <testcase name="test_1" classname="MatchingEngineTests" time=".008575834"/>
+    <testcase name="test_10" classname="MatchingEngineTests" time=".004309541"/>
+    <testcase name="test_11" classname="MatchingEngineTests" time=".004134583"/>
+    <testcase name="test_12" classname="MatchingEngineTests" time=".003204584"/>
+    <testcase name="test_13" classname="MatchingEngineTests" time=".002992250"/>
+    <testcase name="test_14" classname="MatchingEngineTests" time=".002801208"/>
+    <testcase name="test_15" classname="MatchingEngineTests" time=".002415042"/>
+    <testcase name="test_16" classname="MatchingEngineTests" time=".001985417"/>
+    <testcase name="test_2" classname="MatchingEngineTests" time=".001892750"/>
+    <testcase name="test_3" classname="MatchingEngineTests" time=".001767458"/>
+    <testcase name="test_4" classname="MatchingEngineTests" time=".001822416"/>
+    <testcase name="test_5" classname="MatchingEngineTests" time=".001723250"/>
+    <testcase name="test_6" classname="MatchingEngineTests" time=".001795000"/>
+    <testcase name="test_7" classname="MatchingEngineTests" time=".001765125"/>
+    <testcase name="test_8" classname="MatchingEngineTests" time=".001639375"/>
+    <testcase name="test_9" classname="MatchingEngineTests" time=".001631375"/>
+  </testsuite>
+</testsuites>
